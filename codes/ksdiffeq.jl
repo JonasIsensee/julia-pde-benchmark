@@ -1,50 +1,66 @@
 using ApproxFun, OrdinaryDiffEq
 using LinearAlgebra
 using DiffEqOperators
-using PyPlot
+using Plots
 
 
-function deriv(N)
-    coeffs = [n%2==1 ? 0 : n÷2 for n=1:N-1]
-    Tridiagonal(coeffs, zeros(Int, N), -coeffs)
-end
+"""
+ksintegrateDiffEq: integrate kuramoto-sivashinsky equation (Julia)
+       u_t = -u*u_x - u_xx - u_xxxx, domain x in [0,Lx], periodic BCs
+ inputs
+          u = initial condition (vector of u(x) values on uniform gridpoints))
+         Lx = domain length
+         dt = time step
+         Nt = number of integration timesteps
+         nsave = save every n-th timestep
+ outputs
+          u = final state, vector of u(x, Nt*dt) at uniform x gridpoints
+This an implementation using ApproxFun and OrdinaryDiffEq.
+"""
+function ksintegrateDiffEq(u, Lx, dt, Nt, nsave)
+    n = length(u)                  # number of gridpoints
 
-function gen_prob(L,n)
-    Lx = L
-    Nx = n
-
-    S = Fourier(0..L)
-    D =  2π/L*deriv(n)#Derivative(S,1)[1:n,1:n]
-    D2 = Derivative(S,2)[1:n,1:n]
-    D4 = Derivative(S,4)[1:n,1:n]
+    S = Fourier(0..Lx)
     T = ApproxFun.plan_transform(S, n)
     Ti = ApproxFun.plan_itransform(S, n)
 
-    A =  Diagonal(-D2 -D4)
-    Ax = DiffEqArrayOperator(A)
-    tmp1 = zeros(n)
-    tmp2 = zeros(n)
+    #Linear Part
+    D  = (Derivative(S) → S)[1:n,1:n]
+    D2 = Derivative(S,2)[1:n,1:n]
+    D4 = Derivative(S,4)[1:n,1:n]
+    A = DiffEqArrayOperator(Diagonal(-D2-D4))
 
-    function ks_split(du,u,p,t)
-        mul!(tmp1,Ti,u)
-        @. tmp1 = tmp1^2
-        mul!(tmp2, T, tmp1)
-        mul!(du, D, tmp2)
-        @. du = -1/2*du
+    #Nonlinear Part
+    function ks_nonlin(du,u,p,t)
+        D, T, Ti, tmp = p
+        mul!(du,Ti,u)
+        @. du = -1/2*du^2
+        mul!(tmp, T, du)
+        mul!(du, D, tmp)
     end
 
+    params = (D, T, Ti, zeros(n))
+    prob = SplitODEProblem(A,ks_nonlin, T*u, (0.0,Nt*dt), params)
 
-    x = Lx*(0:Nx-1)/Nx
-    u0 = T*(cos.(x).*(1 .+sin.(x)))
-    prob = SplitODEProblem(Ax,ks_split, u0, (0.0,400.0))
-    return prob, Ti
+    sol = solve(prob, ETDRK4(), dt=dt, saveat=0.0:dt*nsave:Nt*dt)
+    return sol.t, map(u -> Ti*u, sol.u)
 end
 
+function make_demo_plot()
+    Lx = 64*pi
+    Nx = 1024
+    dt = 1/16
+    nsave = 8
+    Nt = 3200
 
-prob, Ti = gen_prob(100, 256)
+    x = Lx*(0:Nx-1)/Nx
+    u = cos.(x) + 0.1*sin.(x/8) + 0.01*cos.((2*pi/Lx)*x);
 
-@time sol = solve(prob, ETDRK4(), dt=1/4)
-@time sol = solve(prob, CNAB2(), dt=0.25) #Throws an error, possibly a bug
+    t,U = ksintegrateDiffEq(u, Lx, dt, Nt, nsave)
+    Umat = hcat(U...)'
 
-mat = map(u -> Ti*u, sol.u)
-pcolormesh(mat); colorbar()
+    heatmap(x,t,Umat, xlim=(x[1], x[end]), ylim=(t[1], t[end]), xlabel="x", ylabel="t",
+        title="Kuramoto-Sivashinsky dynamics", fillcolor=:bluesreds)
+end
+
+make_demo_plot()
